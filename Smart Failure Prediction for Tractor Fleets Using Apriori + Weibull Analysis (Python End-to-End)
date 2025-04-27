@@ -1,0 +1,85 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import weibull_min
+from mlxtend.preprocessing import TransactionEncoder
+from mlxtend.frequent_patterns import apriori, association_rules
+
+st.title("🚜 Tractor Fleet Failure Analytics Dashboard")
+
+uploaded_files = st.file_uploader("Upload one or more tractor failure CSV files", type=['csv'], accept_multiple_files=True)
+
+# 🛡️ Check if files uploaded
+if uploaded_files:
+    # 🛡️ Load and combine files
+    dataframes = [pd.read_csv(file) for file in uploaded_files]
+    df = pd.concat(dataframes, ignore_index=True)
+    st.success(f"Loaded {len(uploaded_files)} file(s). Total rows: {df.shape[0]}")
+    st.dataframe(df.head())
+
+    ## =========================
+    ## MAIN ANALYSIS STARTS HERE
+    ## =========================
+
+    # 1. Association Rule Mining
+    grouped = df.groupby('MachineID')['Failure Event'].apply(list)
+    te = TransactionEncoder()
+    te_ary = te.fit(grouped).transform(grouped)
+    df_trans = pd.DataFrame(te_ary, columns=te.columns_)
+
+    min_support = st.slider("Minimum Support", 0.01, 0.5, 0.05)
+    min_confidence = st.slider("Minimum Confidence", 0.5, 1.0, 0.7)
+
+    frequent_itemsets = apriori(df_trans, min_support=min_support, use_colnames=True)
+    rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_confidence)
+
+    st.subheader("🔍 Association Rules (Filtered for Gearbox Failures)")
+    gearbox_rules = rules[rules['consequents'].apply(lambda x: 'Gearbox Failure' in x)]
+    st.dataframe(gearbox_rules[['antecedents', 'consequents', 'support', 'confidence', 'lift']])
+
+    # 2. Weibull Modeling
+    st.subheader("📈 Weibull Analysis for Gearbox Failures")
+
+    gearbox_failures = df[df['Failure Event'] == 'Gearbox Failure']
+
+    if not gearbox_failures.empty:
+        hours_to_failure = gearbox_failures['OperatingHours'].values
+
+        if len(hours_to_failure) > 10:
+            shape, loc, scale = weibull_min.fit(hours_to_failure, floc=0)
+            st.write(f"Weibull Shape (β): {shape:.3f}")
+            st.write(f"Weibull Scale (η): {scale:.3f}")
+
+            x = np.linspace(hours_to_failure.min(), hours_to_failure.max(), 100)
+            cdf = weibull_min.cdf(x, shape, loc, scale)
+
+            fig, ax = plt.subplots()
+            ax.plot(x, cdf, color='red', label='Weibull CDF')
+            ax.set_xlabel('Operating Hours')
+            ax.set_ylabel('Cumulative Probability of Failure')
+            ax.set_title('Gearbox Failure Probability (Weibull Model)')
+            ax.grid(True)
+            ax.legend()
+
+            st.pyplot(fig)
+
+            # ALERT SYSTEM
+            high_risk_threshold = st.slider('Set Risk Threshold (%)', 70, 95, 80)
+
+            risk_hours = x[cdf >= (high_risk_threshold / 100)]
+            if len(risk_hours) > 0:
+                earliest_risk_hour = risk_hours[0]
+                st.error(f"⚠️ ALERT: Gearbox has {high_risk_threshold}% failure probability at {int(earliest_risk_hour)} operating hours!")
+                st.warning("🛠️ Recommend scheduling maintenance before this point!")
+            else:
+                st.success("✅ Gearboxes are operating within safe limits.")
+
+        else:
+            st.warning("⚠️ Not enough gearbox failure records for Weibull analysis.")
+
+    else:
+        st.info("ℹ️ No Gearbox Failure events found in uploaded data.")
+
+else:
+    st.info("Please upload CSV files to begin analysis!")
